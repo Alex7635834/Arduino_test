@@ -1,0 +1,87 @@
+/*
+ * NANO 33 BLE SENSE - FITNESS TRACKER SIMPLE
+ * - Pas de reconnaissance vocale.
+ * - Démarrage automatique à la connexion.
+ * - Envoi des pas toutes les 2 secondes.
+ */
+
+#include <ArduinoBLE.h>
+#include <Arduino_LSM9DS1.h>
+
+// --- UUIDs BLUETOOTH ---
+BLEService fitnessService("19B10000-E8F2-537E-4F6C-D104768A1214");
+BLEIntCharacteristic stepChar("19B10001-E8F2-537E-4F6C-D104768A1214", BLERead | BLENotify);
+
+// --- VARIABLES ---
+int stepCount = 0;
+float oldAccMag = 0;
+long previousMillis = 0;
+long interval = 2000; // Envoi des données toutes les 2000ms (2 secondes)
+
+void setup() {
+    Serial.begin(9600);
+
+    // Initialisation IMU (Accéléromètre)
+    if (!IMU.begin()) {
+        Serial.println("Erreur IMU !");
+        while (1);
+    }
+
+    // Initialisation BLE
+    if (!BLE.begin()) {
+        Serial.println("Erreur BLE !");
+        while (1);
+    }
+
+    BLE.setLocalName("NanoTracker");
+    BLE.setAdvertisedService(fitnessService);
+    fitnessService.addCharacteristic(stepChar);
+    BLE.addService(fitnessService);
+    BLE.advertise();
+
+    Serial.println("Prêt ! En attente de connexion...");
+}
+
+void loop() {
+    BLEDevice central = BLE.central();
+
+    // Si un téléphone est connecté
+    if (central) {
+        Serial.print("Connecté à : ");
+        Serial.println(central.address());
+
+        // On remet le compteur à 0 au début d'une nouvelle séance
+        stepCount = 0;
+        stepChar.writeValue(0);
+
+        while (central.connected()) {
+            unsigned long currentMillis = millis();
+
+            // --- 1. DÉTECTION DE PAS ---
+            float x, y, z;
+            if (IMU.accelerationAvailable()) {
+                IMU.readAcceleration(x, y, z);
+
+                // Calcul de la magnitude
+                float accMag = sqrt(x*x + y*y + z*z);
+
+                // Seuil de détection (1.3 G est standard pour la marche/course)
+                if (accMag > 1.3 && oldAccMag <= 1.3) {
+                    stepCount++;
+                }
+                oldAccMag = accMag;
+            }
+
+            // --- 2. ENVOI BLUETOOTH (Toutes les 2 secondes) ---
+            if (currentMillis - previousMillis >= interval) {
+                previousMillis = currentMillis;
+                stepChar.writeValue(stepCount);
+                Serial.print("Pas envoyés : ");
+                Serial.println(stepCount);
+            }
+        }
+
+        // Quand le téléphone se déconnecte
+        Serial.println("Déconnecté");
+    }
+}
