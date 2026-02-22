@@ -31,6 +31,15 @@
                 <label class="block text-gray-400 text-sm mb-1">Votre Poids (kg)</label>
                 <input type="number" id="weightInput" value="70" class="w-full bg-slate-800 text-white rounded-lg p-3 outline-none focus:ring-2 focus:ring-blue-500 transition">
             </div>
+            <div>
+                <label class="block text-gray-400 text-sm mb-1">Type d'effort</label>
+                <select id="activityInput" class="w-full bg-slate-800 text-white rounded-lg p-3 outline-none focus:ring-2 focus:ring-blue-500 transition">
+                    <option value="2.5">Marche lente / Promenade </option>
+                    <option value="3.8" selected>Marche dynamique </option>
+                    <option value="5.0">Marche rapide / Sportive </option>
+                    <option value="8.0">Course à pied - Jogging </option>
+                </select>
+            </div>
         </div>
 
         <button onclick="startApp()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl transition shadow-[0_0_20px_rgba(37,99,235,0.4)]">
@@ -68,10 +77,11 @@
     </div>
 
     <script>
-        // --- DONNÉES UTILISATEUR ---
+        // --- DONNÉES UTILISATEUR ET PHYSIOLOGIQUES ---
         let userHeight = 175;
         let userWeight = 70;
         let strideLength = 0.72;
+        let userMet = 3.8; // Valeur MET par défaut
 
         // --- VARIABLES CHRONO ---
         let startTime;
@@ -83,13 +93,18 @@
         const stepCharUUID = "19b10001-e8f2-537e-4f6c-d104768a1214";
 
         function startApp() {
+            // Récupération des données du formulaire
             userHeight = parseFloat(document.getElementById('heightInput').value);
             userWeight = parseFloat(document.getElementById('weightInput').value);
+            userMet = parseFloat(document.getElementById('activityInput').value);
+            
+            // Calcul de la foulée personnalisée
             strideLength = (userHeight * 0.415) / 100;
 
             const setupDiv = document.getElementById('setupScreen');
             const dashboardDiv = document.getElementById('dashboardScreen');
 
+            // Transition d'écrans
             setupDiv.style.opacity = '0';
             setTimeout(() => {
                 setupDiv.classList.add('hidden');
@@ -122,7 +137,7 @@
 
             } catch (error) {
                 console.error(error);
-                alert("Erreur connexion : " + error);
+                alert("Erreur de connexion : " + error);
             }
         }
 
@@ -132,7 +147,7 @@
             document.getElementById('btStatus').className = "w-3 h-3 rounded-full bg-red-500 shadow-[0_0_10px_red]";
             document.getElementById('connectBtn').classList.remove('hidden');
             document.getElementById('connectBtn').innerText = "RECONNECTER";
-            alert("Connexion perdue !");
+            alert("Connexion Bluetooth perdue !");
         }
 
         // --- GESTION DU CHRONOMÈTRE ---
@@ -163,14 +178,28 @@
             return val.toString().padStart(2, '0');
         }
 
-        // --- GESTION DES DONNÉES SPORT ---
+        // --- GESTION DES DONNÉES SPORT (Déclenché par l'Arduino) ---
         function updateFitnessData(event) {
             const value = event.target.value;
             const steps = value.getInt32(0, true);
 
+            // 1. Calcul de la distance
             const distanceKm = (steps * strideLength) / 1000;
-            const calories = userWeight * distanceKm * 1.036;
 
+            // 2. Calcul des calories avec la méthode MET
+            let calories = 0;
+            if (isRunning && startTime) {
+                // On convertit les millisecondes écoulées en minutes
+                const elapsedMinutes = (Date.now() - startTime) / 60000;
+                
+                // Application de la formule clinique : (MET * 3.5 * Poids) / 200 = Kcal par minute
+                const kcalPerMinute = (userMet * 3.5 * userWeight) / 200;
+                
+                // Multiplication par le temps total de l'effort
+                calories = kcalPerMinute * elapsedMinutes;
+            }
+
+            // 3. Mise à jour de l'interface
             document.getElementById('stepDisplay').innerText = steps;
             document.getElementById('distDisplay').innerText = distanceKm.toFixed(3);
             document.getElementById('calDisplay').innerText = calories.toFixed(1);
