@@ -18,7 +18,7 @@ bibliothèque ou juste un seuil de la somme des accélérations
 distance : on utilise formule distance = nombre de pas * longueur foulé 
 ou longueur foulé = taille * 0,415
 
-calories : On utilise la formule : Kcal/minute = (MET X 3,5 X Poids en kg)/200 
+calories : On utilise la formule : Kcal/minute = (MET X 3,5 X Poids en kg)/200 ATTENTION IL MANQUE UNE DEPENDANCE EN distance
 On multplie juste par le nombre de minute.
 ou MET= metabolic equivalent of task c’est un coefficient qui change selon l’activité
 
