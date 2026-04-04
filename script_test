@@ -1,5 +1,5 @@
 /*
- * NANO 33 BLE SENSE - FITNESS TRACKER AVANCÉ (V2 - Filtrée)
+ * NANO 33 BLE SENSE - FITNESS TRACKER AVANCÉ (V2 - Filtrée )
  * - Ajout d'un filtre passe-bas (EMA) pour éliminer les micro-vibrations.
  * - Noise Gate et Anti-rebond durcis.
  */
