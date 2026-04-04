@@ -1,8 +1,7 @@
 /*
- * NANO 33 BLE SENSE - FITNESS TRACKER SIMPLE
- * - Pas de reconnaissance vocale.
- * - Démarrage automatique à la connexion.
- * - Envoi des pas toutes les 2 secondes.
+ * NANO 33 BLE SENSE - FITNESS TRACKER AVANCÉ (V2 - Filtrée)
+ * - Ajout d'un filtre passe-bas (EMA) pour éliminer les micro-vibrations.
+ * - Noise Gate et Anti-rebond durcis.
  */
 
 #include <ArduinoBLE.h>
@@ -12,22 +11,36 @@
 BLEService fitnessService("19B10000-E8F2-537E-4F6C-D104768A1214");
 BLEIntCharacteristic stepChar("19B10001-E8F2-537E-4F6C-D104768A1214", BLERead | BLENotify);
 
-// --- VARIABLES ---
+// --- VARIABLES DE BASE ---
 int stepCount = 0;
-float oldAccMag = 0;
 long previousMillis = 0;
-long interval = 2000; // Envoi des données toutes les 2000ms (2 secondes)
+long interval = 2000;
+
+// --- VARIABLES ALGORITHME PODOMÈTRE ---
+const int WINDOW_SIZE = 50;     
+float accHistory[WINDOW_SIZE];  
+int historyIdx = 0;
+bool bufferFilled = false;      
+
+float oldAccMag = 1.0;          
+unsigned long lastStepTime = 0; 
+
+// --- NOUVELLES VARIABLES FILTRE PASSE-BAS ---
+float smoothedAccMag = 1.0; 
+const float ALPHA = 0.15; // Facteur de lissage ( 0.3Plus c'est proche de 0, plus ça lisse le bruit)
+
+// --- PARAMÈTRES RÉGLABLES DURCIS ---
+const unsigned long DEBOUNCE_DELAY = 350; // Allongé à 500ms pour éviter les doubles comptages
+const float NOISE_GATE = 0.3;             // Augmenté à 0.4G : ignore les petits mouvements de bras
 
 void setup() {
     Serial.begin(9600);
 
-    // Initialisation IMU (Accéléromètre)
     if (!IMU.begin()) {
         Serial.println("Erreur IMU !");
         while (1);
     }
 
-    // Initialisation BLE
     if (!BLE.begin()) {
         Serial.println("Erreur BLE !");
         while (1);
@@ -39,49 +52,72 @@ void setup() {
     BLE.addService(fitnessService);
     BLE.advertise();
 
+    for(int i = 0; i < WINDOW_SIZE; i++) {
+        accHistory[i] = 1.0;
+    }
+
     Serial.println("Prêt ! En attente de connexion...");
 }
 
 void loop() {
     BLEDevice central = BLE.central();
 
-    // Si un téléphone est connecté
     if (central) {
-        Serial.print("Connecté à : ");
-        Serial.println(central.address());
-
-        // On remet le compteur à 0 au début d'une nouvelle séance
         stepCount = 0;
         stepChar.writeValue(0);
+        bufferFilled = false;
+        historyIdx = 0;
 
         while (central.connected()) {
             unsigned long currentMillis = millis();
 
-            // --- 1. DÉTECTION DE PAS ---
             float x, y, z;
             if (IMU.accelerationAvailable()) {
                 IMU.readAcceleration(x, y, z);
+                
+                // 1. CALCUL ET FILTRAGE PASSE-BAS
+                float rawAccMag = sqrt(x*x + y*y + z*z);
+                
+                // Application du filtre : on mélange 15% de la nouvelle valeur avec 85% de l'ancienne
+                smoothedAccMag = (ALPHA * rawAccMag) + ((1.0 - ALPHA) * smoothedAccMag);
 
-                // Calcul de la magnitude
-                float accMag = sqrt(x*x + y*y + z*z);
+                // On utilise maintenant la valeur LISSÉE pour tout le reste
+                accHistory[historyIdx] = smoothedAccMag;
+                historyIdx = (historyIdx + 1) % WINDOW_SIZE;
+                if (historyIdx == 0) bufferFilled = true;
 
-                // Seuil de détection (1.3 G est standard pour la marche/course)
-                if (accMag > 1.3 && oldAccMag <= 1.3) {
-                    stepCount++;
+                // 2. CALCUL DU SEUIL DYNAMIQUE
+                float maxAcc = 0.0;
+                float minAcc = 10.0; 
+                
+                for(int i = 0; i < WINDOW_SIZE; i++) {
+                    if(accHistory[i] > maxAcc) maxAcc = accHistory[i];
+                    if(accHistory[i] < minAcc) minAcc = accHistory[i];
                 }
-                oldAccMag = accMag;
+                
+                float dynamicThreshold = (maxAcc + minAcc) / 2.0;
+
+                // 3. DÉTECTION DES PAS
+                if ((maxAcc - minAcc) > NOISE_GATE && bufferFilled) {
+                    
+                    if (smoothedAccMag > dynamicThreshold && oldAccMag <= dynamicThreshold) {
+                        
+                        if (currentMillis - lastStepTime > DEBOUNCE_DELAY) {
+                            stepCount++;
+                            lastStepTime = currentMillis;
+                        }
+                    }
+                }
+                oldAccMag = smoothedAccMag;
             }
 
-            // --- 2. ENVOI BLUETOOTH (Toutes les 2 secondes) ---
+            // 4. ENVOI BLUETOOTH
             if (currentMillis - previousMillis >= interval) {
                 previousMillis = currentMillis;
                 stepChar.writeValue(stepCount);
-                Serial.print("Pas envoyés : ");
-                Serial.println(stepCount);
             }
         }
-
-        // Quand le téléphone se déconnecte
-        Serial.println("Déconnecté");
     }
 }
+
+
