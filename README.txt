@@ -1,39 +1,48 @@
-#Projet Nano Tracker Pro
+PROJET NANO TRACKER PRO
 
-## Description du Projet
-Ce dépôt contient l'ensemble du code source du projet Nano Tracker Pro, un système embarqué complet de suivi d'activité physique. Le dispositif repose sur l'intégration d'un microcontrôleur Arduino doté d'une connectivité Bluetooth Low Energy (BLE), d'une centrale inertielle (IMU) pour l'acquisition des données biomécaniques (comptage des pas), et d'un microphone exploitant un modèle TinyML pour la reconnaissance vocale des différents modes d'activité.
+DESCRIPTION DU PROJET
+Ce depot contient l'ensemble du code source du projet Nano Tracker Pro, un systeme embarque complet de suivi d'activite physique. Le dispositif repose sur l'integration d'un microcontroleur Arduino dote d'une connectivite Bluetooth Low Energy, d'une centrale inertielle pour l'acquisition des donnees biomecaniques, et d'un microphone exploitant un modele d'apprentissage automatique pour la reconnaissance vocale des differents modes d'activite.
 
-## Architecture du Dépôt
-Le projet est architecturé autour de trois composants logiciels distincts, assurant la séparation entre l'acquisition des données, leur transmission, et l'interface utilisateur :
+ARCHITECTURE DU SYSTEME
+Le projet est architecture autour de trois composants logiciels distincts, assurant une separation stricte entre l'acquisition des signaux, leur transmission et l'interface utilisateur :
 
-* **`script_test`** : Le firmware en C++ destiné à la carte Arduino. Il orchestre le traitement du signal inertiel en temps réel, l'inférence du modèle d'apprentissage automatique sur le flux audio, et la gestion du serveur GATT pour la communication BLE.
-* **`code_app`** : Une application mobile multiplateforme développée en Flutter/Dart. Elle gère la découverte et la synchronisation BLE avec l'Arduino, permet le paramétrage des données physiologiques de l'athlète, et calcule les métriques d'effort détaillées (distance, allure, calories).
-* **`arduino_web.html`** : Une interface Web allégée (HTML/JS/TailwindCSS) offrant une alternative au client mobile en exploitant l'API Web Bluetooth pour lire et afficher les données de la séance.
+script_test : Le firmware en C++ destine a la carte Arduino. Il orchestre le traitement du signal inertiel en temps reel, l'inference du modele sur le flux audio, et la gestion du serveur GATT pour la communication Bluetooth.
 
-## Traitement du Signal et Algorithmique
+code_app : Une application mobile developpee en Flutter et Dart. Elle gere la decouverte et la synchronisation avec l'Arduino, permet le parametrage des donnees physiologiques de l'athlete, et calcule les metriques d'effort detaillees (distance, allure, calories).
 
-### 1. Podomètre et Accélérométrie (Embarqué)
-Le comptage des pas est réalisé localement par le microcontrôleur afin de minimiser la bande passante Bluetooth. Il repose sur l'analyse de la norme du vecteur d'accélération tridimensionnel :
-* **Filtrage** : Application d'un filtre passe-bas (coefficient $\alpha = 0.30$) pour atténuer le bruit de mesure haute fréquence inhérent au capteur LSM9DS1.
-* **Seuillage Dynamique** : Le seuil de détection des pas est recalculé dynamiquement sur une fenêtre glissante (50 échantillons) en évaluant la moyenne des accélérations maximales et minimales récentes.
-* **Délai Anti-rebond** : Un filtre temporel (350 ms) ignore les pics d'accélération trop rapprochés, prévenant ainsi les faux positifs.
+arduino_web.html : Une interface Web HTML et JavaScript offrant une alternative au client mobile en exploitant l'API Web Bluetooth pour lire et afficher les donnees de la seance directement dans le navigateur.
 
-### 2. Classification Vocale via TinyML (Embarqué)
-Le changement de contexte d'effort s'effectue par commande vocale. Le système embarque un modèle d'apprentissage automatique généré via Edge Impulse, qui analyse les données du microphone PDM. L'inférence classifie le flux audio selon trois étiquettes avec des seuils de confiance stricts :
-* **"Marche"** (Seuil de détection : > 80%)
-* **"Course"** (Seuil de détection : > 75%)
-* **"Stop"** (Seuil de détection : > 80%)
+TRAITEMENT DU SIGNAL ET ALGORITHMIQUE
 
-### 3. Modèles Biomécaniques et Dépense Énergétique (Client)
-L'Arduino transmet de manière asynchrone le compteur brut de pas et les changements d'état via le protocole BLE. Les clients (Flutter ou Web) se chargent des calculs physiologiques en s'appuyant sur les données anthropométriques saisies par l'utilisateur (poids, taille) :
-* **Longueur de foulée** : Modélisée par l'équation empirique `Taille (cm) × 0.415`.
-* **Distance** : `Nombre de pas × Longueur de foulée`.
-* **Dépense Énergétique (Calories)** : L'application utilise l'Équivalent Métabolique (MET), variant selon le type d'effort (ex: 3.8 pour la marche dynamique, 8.0 pour la course). La puissance calorique est évaluée par la formule clinique : 
-  `Kcal/min = (MET × 3.5 × Poids en kg) / 200`
-  Cette puissance est ensuite intégrée sur la durée chronométrée de l'effort pour obtenir l'énergie totale dépensée.
+PARTIE 1 : PODOMETRE ET ACCELEROMETRIE
+Le comptage des pas est realise localement par le microcontroleur afin de minimiser la charge de la bande passante Bluetooth. Il repose sur l'analyse rigoureuse de la norme du vecteur d'acceleration tridimensionnel :
 
-## Déploiement et Utilisation
+Filtrage : Application d'un filtre passe-bas avec un coefficient alpha de 0.30 pour attenuer le bruit de mesure haute frequence inherent au capteur physique.
 
-1. **Firmware Arduino** : Flashez le contenu du fichier `script_test` sur votre carte (ex: Arduino Nano 33 BLE Sense). Assurez-vous d'avoir installé les bibliothèques requises (`PDM`, `ArduinoBLE`, `Arduino_LSM9DS1`) ainsi que l'archive de votre modèle Edge Impulse.
-2. **Client Mobile** : Compilez le dossier `code_app` via l'environnement Flutter (`flutter run`). Autorisez l'accès au Bluetooth et à la localisation (requis par Android/iOS pour le scan BLE).
-3. **Mise en route** : Allumez la carte, lancez l'application, et connectez l'appareil. Prononcez distinctement "Marche" ou "Course" près du microphone de l'Arduino pour initier le calcul des métriques.
+Seuillage Dynamique : Le seuil de detection des pas n'est pas fixe. Il est recalcule dynamiquement sur une fenetre glissante de 50 echantillons en evaluant la moyenne des accelerations maximales et minimales recentes.
+
+Delai Anti-rebond : Un filtre temporel strict de 350 millisecondes ignore les pics d'acceleration trop rapproches, prevenant de maniere proactive les faux positifs.
+
+PARTIE 2 : CLASSIFICATION VOCALE
+Le changement de contexte d'effort s'effectue exclusivement par commande vocale. Le systeme embarque un reseau de neurones genere via Edge Impulse, qui analyse les donnees brutes du microphone PDM. L'inference classifie le flux audio selon trois classes avec des seuils de probabilite severes :
+
+La detection du mot Marche necessite un degre de certitude superieur a 80 pourcents.
+
+La detection du mot Course necessite un degre de certitude superieur a 75 pourcents.
+
+La detection du mot Stop necessite un degre de certitude superieur a 80 pourcents.
+
+PARTIE 3 : MODELES BIOMECANIQUES ET DEPENSE ENERGETIQUE
+L'Arduino transmet asynchrone le compteur brut de pas et les changements d'etat via le protocole Bluetooth. Les clients (Flutter ou Web) ont la responsabilite d'effectuer les calculs physiologiques terminaux en s'appuyant sur les donnees anthropometriques fournies par l'utilisateur :
+
+Longueur de foulee : Elle est modelisee par l'equation empirique multipliant la taille en centimetres par un facteur de 0.415.
+
+Distance absolue : Elle est obtenue en multipliant le nombre total de pas par la longueur de la foulee calculee precedemment.
+
+Depense Energetique : L'application utilise l'Equivalent Metabolique, une variable dependante du type d'effort (par exemple 3.8 pour la marche dynamique, 8.0 pour la course). La puissance calorique est evaluee par la formule clinique suivante : Kcal par minute equivaut au produit de l'Equivalent Metabolique, de la constante 3.5 et du poids en kilogrammes, le tout divise par 200. Cette puissance est ensuite integree sur la duree d'effort pour obtenir l'energie totale consommee.
+
+DEPLOIEMENT ET INSTRUCTIONS D'UTILISATION
+
+Etape 1 : Flashez le contenu du fichier script_test sur votre carte Arduino Nano. Vous devez vous assurer au prealable d'avoir installe les bibliotheques requises dans votre environnement (PDM, ArduinoBLE, Arduino_LSM9DS1) ainsi que l'archive specifique de votre modele d'apprentissage Edge Impulse.
+Etape 2 : Compilez le dossier code_app via votre environnement de developpement Flutter. Autorisez imperativement l'acces au Bluetooth et aux services de localisation sur l'appareil cible.
+Etape 3 : Mettez la carte sous tension, lancez l'application mobile ou web, et connectez l'appareil. Prononcez distinctement le mot Marche ou Course pres du microphone de l'Arduino pour declencher l'acquisition et le calcul des metriques.
