@@ -1,0 +1,623 @@
+import 'dart:async';
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const NanoTrackerApp());
+}
+
+class NanoTrackerApp extends StatelessWidget {
+  const NanoTrackerApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Nano Tracker Pro',
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
+        textTheme: GoogleFonts.interTextTheme(ThemeData.dark().textTheme),
+      ),
+      home: const MainTrackerPage(),
+    );
+  }
+}
+
+class MainTrackerPage extends StatefulWidget {
+  const MainTrackerPage({super.key});
+
+  @override
+  State<MainTrackerPage> createState() => _MainTrackerPageState();
+}
+
+class _MainTrackerPageState extends State<MainTrackerPage> {
+  // --- DONNÉES UTILISATEUR ---
+  double userHeight = 175.0;
+  double userWeight = 70.0;
+  double strideLength = 0.72;
+  double currentMet = 3.8;
+
+  // --- VARIABLES UI & ÉTATS ---
+  bool isConnected = false;
+  bool isScanning = false;
+  bool isActivityRunning = false;
+  bool showSummary = false; // NOUVEAU : contrôle l'affichage du résumé
+  String activityName = "MARCHE";
+
+  // --- SPORT & CHRONO ---
+  int steps = 0;
+  double distanceKm = 0.0;
+  double calories = 0.0;
+  Duration duration = Duration.zero;
+  Timer? timerInterval;
+
+  // --- DONNÉES DU RÉSUMÉ (sauvegardées au moment du STOP) ---
+  int summarySteps = 0;
+  double summaryDistanceKm = 0.0;
+  double summaryCalories = 0.0;
+  Duration summaryDuration = Duration.zero;
+  String summaryActivityName = "MARCHE";
+
+  // --- BLUETOOTH ---
+  BluetoothDevice? connectedDevice;
+
+  final Guid serviceUUID = Guid("19b100aa-e8f2-537e-4f6c-d104768a1214");
+  final Guid stepCharUUID = Guid("19b10001-e8f2-537e-4f6c-d104768a1214");
+  final Guid stateCharUUID = Guid("19b10002-e8f2-537e-4f6c-d104768a1214");
+
+  StreamSubscription<List<int>>? stepSub;
+  StreamSubscription<List<int>>? stateSub;
+
+  @override
+  void initState() {
+    super.initState();
+    requestPermissions();
+  }
+
+  void requestPermissions() async {
+    await [
+      Permission.location,
+      Permission.bluetooth,
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+    ].request();
+  }
+
+  @override
+  void dispose() {
+    timerInterval?.cancel();
+    stepSub?.cancel();
+    stateSub?.cancel();
+    connectedDevice?.disconnect();
+    super.dispose();
+  }
+
+  Future<void> connectBluetooth() async {
+    if (isScanning) return;
+
+    setState(() => isScanning = true);
+
+    try {
+      if (await FlutterBluePlus.adapterState.first == BluetoothAdapterState.off) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("❌ Veuillez activer le Bluetooth du téléphone.")));
+        setState(() => isScanning = false);
+        return;
+      }
+
+      await FlutterBluePlus.startScan(withServices: [serviceUUID], timeout: const Duration(seconds: 15));
+
+      StreamSubscription<List<ScanResult>>? scanSub;
+      scanSub = FlutterBluePlus.scanResults.listen((results) async {
+        if (results.isNotEmpty) {
+          ScanResult r = results.first;
+          connectedDevice = r.device;
+
+          await FlutterBluePlus.stopScan();
+          scanSub?.cancel();
+
+          try {
+            await connectedDevice!.connect(autoConnect: false);
+
+            if (!mounted) return;
+            setState(() {
+              isConnected = true;
+              isScanning = false;
+              strideLength = (userHeight * 0.415) / 100;
+            });
+
+            bool etatCharTrouve = false;
+
+            List<BluetoothService> services = await connectedDevice!.discoverServices();
+            for (var service in services) {
+              if (service.uuid == serviceUUID) {
+                for (var characteristic in service.characteristics) {
+                  if (characteristic.uuid == stepCharUUID) {
+                    await characteristic.setNotifyValue(true);
+                    stepSub = characteristic.onValueReceived.listen((value) {
+                      if (value.length >= 4) {
+                        int newSteps = ByteData.view(Uint8List.fromList(value).buffer)
+                            .getInt32(0, Endian.little);
+                        if (isActivityRunning) updateFitnessData(newSteps);
+                      }
+                    });
+                  }
+
+                  if (characteristic.uuid == stateCharUUID) {
+                    etatCharTrouve = true;
+                    await characteristic.setNotifyValue(true);
+                    stateSub = characteristic.onValueReceived.listen((value) {
+                      if (value.isNotEmpty) {
+                        gererOrdreArduino(value[0]);
+                      }
+                    });
+                  }
+                }
+              }
+            }
+
+            if (!mounted) return;
+            if (etatCharTrouve) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text("✅ Connexion vocale établie avec la montre !"),
+                  backgroundColor: Colors.green));
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text("❌ Erreur : Canal vocal introuvable (Cache bloqué)"),
+                  backgroundColor: Colors.red));
+            }
+
+            connectedDevice!.connectionState.listen((BluetoothConnectionState state) {
+              if (state == BluetoothConnectionState.disconnected) onDisconnected();
+            });
+          } catch (connectError) {
+            onDisconnected();
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("❌ La montre a rejeté la connexion.")));
+          }
+        }
+      });
+
+      Future.delayed(const Duration(seconds: 15), () {
+        if (isScanning && mounted) {
+          FlutterBluePlus.stopScan();
+          scanSub?.cancel();
+          setState(() => isScanning = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text("⚠️ Montre introuvable. Est-elle allumée ?")));
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => isScanning = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("❌ Erreur système : $e")));
+    }
+  }
+
+  void onDisconnected() {
+    stopTimer();
+    setState(() {
+      isConnected = false;
+      isActivityRunning = false;
+      showSummary = false;
+      connectedDevice = null;
+    });
+  }
+
+  void gererOrdreArduino(int etat) {
+    if (etat == 0) {
+      stopTimer();
+      // NOUVEAU : on sauvegarde les données AVANT de remettre à zéro
+      setState(() {
+        summarySteps = steps;
+        summaryDistanceKm = distanceKm;
+        summaryCalories = calories;
+        summaryDuration = duration;
+        summaryActivityName = activityName;
+
+        isActivityRunning = false;
+        showSummary = true; // On bascule vers l'écran résumé
+      });
+    } else if (etat == 1 || etat == 2) {
+      setState(() {
+        steps = 0;
+        distanceKm = 0.0;
+        calories = 0.0;
+        duration = Duration.zero;
+        isActivityRunning = true;
+        showSummary = false;
+
+        if (etat == 1) {
+          activityName = "MARCHE";
+          currentMet = 3.8;
+        } else {
+          activityName = "COURSE";
+          currentMet = 8.0;
+        }
+      });
+      startTimer();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text("Activité $activityName démarrée !"),
+          backgroundColor: Colors.green));
+    }
+  }
+
+  void startTimer() {
+    timerInterval?.cancel();
+    timerInterval = Timer.periodic(const Duration(seconds: 1), (timer) {
+      setState(() => duration += const Duration(seconds: 1));
+    });
+  }
+
+  void stopTimer() => timerInterval?.cancel();
+
+  void updateFitnessData(int newSteps) {
+    setState(() {
+      steps = newSteps;
+      distanceKm = (steps * strideLength) / 1000;
+      double elapsedMinutes = duration.inSeconds / 60.0;
+      double kcalPerMinute = (currentMet * 3.5 * userWeight) / 200;
+      calories = kcalPerMinute * elapsedMinutes;
+    });
+  }
+
+  String formatTime(Duration d) {
+    String twoDigits(int n) => n.toString().padLeft(2, "0");
+    return "${twoDigits(d.inHours)}:${twoDigits(d.inMinutes.remainder(60))}:${twoDigits(d.inSeconds.remainder(60))}";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            children: [
+              _buildHeader(),
+              const SizedBox(height: 30),
+              Expanded(
+                child: isActivityRunning
+                    ? _buildDashboard()
+                    : showSummary
+                        ? _buildSummaryScreen() // NOUVEAU
+                        : _buildSetupScreen(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        RichText(
+          text: TextSpan(
+            style: GoogleFonts.inter(fontSize: 24, fontWeight: FontWeight.bold),
+            children: const [
+              TextSpan(text: 'NANO'),
+              TextSpan(text: 'TRACKER', style: TextStyle(color: Colors.blue)),
+            ],
+          ),
+        ),
+        Row(
+          children: [
+            if (isConnected && !isActivityRunning && !showSummary)
+              const Text("EN ÉCOUTE ",
+                  style: TextStyle(color: Colors.green, fontSize: 10, fontWeight: FontWeight.bold)),
+            Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: isConnected ? Colors.green : Colors.red,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                      color: isConnected ? Colors.greenAccent : Colors.redAccent, blurRadius: 10)
+                ],
+              ),
+            ),
+          ],
+        )
+      ],
+    );
+  }
+
+  // =========================================================================
+  // NOUVEAU : ÉCRAN RÉSUMÉ DE L'ACTIVITÉ
+  // =========================================================================
+  Widget _buildSummaryScreen() {
+    // Calcul de l'allure (min/km) si distance > 0
+    String allure = "--'--\"";
+    if (summaryDistanceKm > 0) {
+      double minPerKm = summaryDuration.inSeconds / 60.0 / summaryDistanceKm;
+      int minPart = minPerKm.floor();
+      int secPart = ((minPerKm - minPart) * 60).round();
+      allure = "$minPart'${secPart.toString().padLeft(2, '0')}\"";
+    }
+
+    return SingleChildScrollView(
+      child: Column(
+        children: [
+          // --- EN-TÊTE RÉSUMÉ ---
+          const Icon(Icons.flag_rounded, color: Colors.blue, size: 48),
+          const SizedBox(height: 8),
+          const Text(
+            "ACTIVITÉ TERMINÉE",
+            style: TextStyle(
+                fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 3, color: Colors.white),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            "MODE $summaryActivityName",
+            style: const TextStyle(fontSize: 14, color: Colors.blue, letterSpacing: 2),
+          ),
+          const SizedBox(height: 24),
+
+          // --- CARTE DURÉE ---
+          _glassPanel(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.timer_outlined, color: Colors.grey, size: 20),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text("DURÉE",
+                        style: TextStyle(fontSize: 11, color: Colors.grey, letterSpacing: 2)),
+                    Text(
+                      formatTime(summaryDuration),
+                      style: const TextStyle(
+                          fontSize: 36, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          // --- CARTE CALORIES (mise en avant) ---
+          _glassPanel(
+            padding: 28,
+            child: Column(
+              children: [
+                Text(
+                  summaryCalories.toStringAsFixed(1),
+                  style: const TextStyle(
+                    fontSize: 64,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.orange,
+                    shadows: [Shadow(color: Colors.orange, blurRadius: 15)],
+                  ),
+                ),
+                const Text("CALORIES BRÛLÉES",
+                    style: TextStyle(
+                        color: Colors.orange, fontWeight: FontWeight.bold, letterSpacing: 2)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          // --- GRILLE PAS / DISTANCE / ALLURE ---
+          Row(
+            children: [
+              Expanded(child: _summaryCard(Icons.directions_walk, summarySteps.toString(), "PAS", Colors.green)),
+              const SizedBox(width: 12),
+              Expanded(
+                  child: _summaryCard(Icons.straighten, summaryDistanceKm.toStringAsFixed(2), "KM", Colors.cyan)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _glassPanel(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.speed_outlined, color: Colors.purpleAccent, size: 22),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text("ALLURE MOYENNE",
+                        style: TextStyle(fontSize: 11, color: Colors.grey, letterSpacing: 2)),
+                    Text(allure,
+                        style: const TextStyle(
+                            fontSize: 26,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.purpleAccent)),
+                  ],
+                ),
+                const Text(" /km", style: TextStyle(color: Colors.grey, fontSize: 14)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 30),
+
+          // --- BOUTON RETOUR ---
+          ElevatedButton.icon(
+            onPressed: () => setState(() => showSummary = false),
+            icon: const Icon(Icons.home_outlined, color: Colors.white),
+            label: const Text("RETOUR À L'ACCUEIL",
+                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.indigo[700],
+              minimumSize: const Size(double.infinity, 56),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryCard(IconData icon, String value, String label, Color color) {
+    return _glassPanel(
+      child: Column(
+        children: [
+          Icon(icon, color: color, size: 22),
+          const SizedBox(height: 6),
+          Text(value,
+              style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: color)),
+          const SizedBox(height: 4),
+          Text(label,
+              style: const TextStyle(fontSize: 11, color: Colors.grey, letterSpacing: 1)),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================================
+  // ÉCRANS EXISTANTS (inchangés)
+  // =========================================================================
+
+  Widget _buildSetupScreen() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _glassPanel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Center(
+                  child: Text("Profil Athlète",
+                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
+              const SizedBox(height: 20),
+              Center(
+                  child: Text("Taille: ${userHeight.toInt()} cm",
+                      style: const TextStyle(color: Colors.blue))),
+              Slider(
+                  value: userHeight,
+                  min: 100,
+                  max: 220,
+                  activeColor: Colors.blue,
+                  onChanged: (v) => setState(() => userHeight = v)),
+              const SizedBox(height: 10),
+              Center(
+                  child: Text("Poids: ${userWeight.toInt()} kg",
+                      style: const TextStyle(color: Colors.blue))),
+              Slider(
+                  value: userWeight,
+                  min: 40,
+                  max: 150,
+                  activeColor: Colors.blue,
+                  onChanged: (v) => setState(() => userWeight = v)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 40),
+        if (!isConnected)
+          ElevatedButton(
+            onPressed: isScanning ? null : connectBluetooth,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.indigo[600],
+              minimumSize: const Size(double.infinity, 60),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+            ),
+            child: Text(isScanning ? "RECHERCHE..." : "📡 CONNECTER LA MONTRE",
+                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+          )
+        else
+          Column(
+            children: [
+              const Icon(Icons.mic, size: 50, color: Colors.green),
+              const SizedBox(height: 10),
+              Text("Connecté. Dites 'Marche' ou 'Course' à la montre pour commencer.",
+                  textAlign: TextAlign.center, style: TextStyle(color: Colors.grey[400])),
+            ],
+          )
+      ],
+    );
+  }
+
+  Widget _buildDashboard() {
+    return Column(
+      children: [
+        Text("MODE $activityName",
+            style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.blue,
+                letterSpacing: 2)),
+        const SizedBox(height: 20),
+        _glassPanel(
+          child: Column(
+            children: [
+              const Text("DURÉE DE L'EFFORT",
+                  style: TextStyle(fontSize: 12, color: Colors.grey, letterSpacing: 2)),
+              const SizedBox(height: 10),
+              Text(formatTime(duration),
+                  style: const TextStyle(
+                      fontSize: 40, fontWeight: FontWeight.bold, fontFamily: 'monospace')),
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
+        _glassPanel(
+          padding: 30,
+          child: Column(
+            children: [
+              Text(calories.toStringAsFixed(1),
+                  style: const TextStyle(
+                      fontSize: 60,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.orange,
+                      shadows: [Shadow(color: Colors.orange, blurRadius: 10)])),
+              const Text("CALORIES",
+                  style: TextStyle(
+                      color: Colors.orange, fontWeight: FontWeight.bold, letterSpacing: 2)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
+        Row(
+          children: [
+            Expanded(child: _dataCard(steps.toString(), "PAS", Colors.green)),
+            const SizedBox(width: 15),
+            Expanded(child: _dataCard(distanceKm.toStringAsFixed(2), "KM", Colors.cyan)),
+          ],
+        ),
+        const Spacer(),
+        Text("Dites 'Stop' à la montre pour terminer",
+            style: TextStyle(color: Colors.red[300], fontStyle: FontStyle.italic)),
+      ],
+    );
+  }
+
+  Widget _glassPanel({required Widget child, double padding = 20}) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(padding),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E293B).withOpacity(0.7),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.1)),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _dataCard(String value, String label, Color color) {
+    return _glassPanel(
+      child: Column(
+        children: [
+          Text(value,
+              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: color)),
+          const SizedBox(height: 5),
+          Text(label,
+              style: const TextStyle(fontSize: 12, color: Colors.grey, letterSpacing: 1)),
+        ],
+      ),
+    );
+  }
+}

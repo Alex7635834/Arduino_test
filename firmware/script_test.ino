@@ -1,0 +1,297 @@
+#define EIDSP_QUANTIZE_FILTERBANK   0
+
+#include <PDM.h>
+// METTRE LE NOM EXACT DE TA BIBLIOTHÈQUE ICI :
+#include <Projet_de_Recherche_inferencing.h> 
+
+#include <ArduinoBLE.h>
+#include <Arduino_LSM9DS1.h>
+
+// --- UUIDs BLUETOOTH ---
+BLEService fitnessService("19B100AA-E8F2-537E-4F6C-D104768A1214");
+BLEIntCharacteristic stepChar("19B10001-E8F2-537E-4F6C-D104768A1214", BLERead | BLENotify);
+BLEByteCharacteristic etatChar("19B10002-E8F2-537E-4F6C-D104768A1214", BLERead | BLENotify);
+
+// --- VARIABLES PODOMÈTRE & FILTRE ---
+int stepCount = 0;
+long previousMillis = 0;
+long interval = 1000; 
+
+const int WINDOW_SIZE = 50;
+float accHistory[WINDOW_SIZE];
+int historyIdx = 0;
+bool bufferFilled = false;
+float oldAccMag = 1.0;
+unsigned long lastStepTime = 0;
+float smoothedAccMag = 1.0;
+
+const float ALPHA = 0.30; 
+const unsigned long DEBOUNCE_DELAY = 350;
+const float NOISE_GATE = 0.3;
+
+// --- GESTION DES ÉTATS ---
+enum ModeTracker { VEILLE = 0, MARCHE = 1, COURSE = 2 };
+ModeTracker modeActuel = VEILLE;
+
+// --- VARIABLES MICROPHONE ---
+typedef struct {
+    int16_t *buffer;
+    uint8_t buf_ready;
+    uint32_t buf_count;
+    uint32_t n_samples;
+} inference_t;
+
+static inference_t inference;
+static signed short sampleBuffer[2048];
+static bool debug_nn = false;
+
+// =========================================================================
+// FONCTIONS DE CONTRÔLE & BLUETOOTH
+// =========================================================================
+
+
+void attenteActiveBLE(unsigned long ms) {
+    unsigned long start = millis();
+    while (millis() - start < ms) {
+        BLE.poll(); // Force le traitement des paquets Bluetooth en arrière-plan
+        delay(10);
+    }
+}
+
+void changerEtat(ModeTracker nouveauMode) {
+    modeActuel = nouveauMode;
+    etatChar.writeValue((byte)modeActuel); 
+
+    BLE.poll(); 
+    
+    if (modeActuel != VEILLE) {
+        stepCount = 0; 
+        stepChar.writeValue(stepCount);
+        digitalWrite(LED_BUILTIN, HIGH);
+        Serial.println(">>> ORDRE BLUETOOTH ENVOYÉ : DÉMARRAGE <<<");
+    } else {
+        digitalWrite(LED_BUILTIN, LOW);
+        Serial.println(">>> ORDRE BLUETOOTH ENVOYÉ : VEILLE <<<");
+    }
+}
+
+// =========================================================================
+// MOTEUR PODOMÈTRE - mesure des pas
+// =========================================================================
+
+void gererPodometre() {
+    BLE.poll(); 
+
+    if (modeActuel == VEILLE) return;
+
+    unsigned long currentMillis = millis();
+
+    float x, y, z;
+    if (IMU.accelerationAvailable()) {
+        IMU.readAcceleration(x, y, z);
+        float rawAccMag = sqrt(x*x + y*y + z*z);
+        smoothedAccMag = (ALPHA * rawAccMag) + ((1.0 - ALPHA) * smoothedAccMag); // Filtrage passe-bas
+        
+        accHistory[historyIdx] = smoothedAccMag;
+        historyIdx = (historyIdx + 1) % WINDOW_SIZE;
+        if (historyIdx == 0) bufferFilled = true;
+
+        float maxAcc = 0.0, minAcc = 10.0;
+        for(int i = 0; i < WINDOW_SIZE; i++) {
+            if(accHistory[i] > maxAcc) maxAcc = accHistory[i];
+            if(accHistory[i] < minAcc) minAcc = accHistory[i];
+        }
+        
+        float dynamicThreshold = (maxAcc + minAcc) / 2.0; // Seuil dynamique basé sur la moyenne des extrêmes
+
+        if ((maxAcc - minAcc) > NOISE_GATE && bufferFilled) { // Amplitude suffisante pour détecter un pas (différence entre max et min)
+            if (smoothedAccMag > dynamicThreshold && oldAccMag <= dynamicThreshold) { // Détection théorique d'un pas
+                if (currentMillis - lastStepTime > DEBOUNCE_DELAY) { // Anti debounce
+                    stepCount++;
+                    lastStepTime = currentMillis;
+                }
+            }
+        }
+        oldAccMag = smoothedAccMag;
+    }
+
+    if (BLE.central().connected()) {
+        if (currentMillis - previousMillis >= interval) {
+            previousMillis = currentMillis;
+            stepChar.writeValue(stepCount);
+        }
+    }
+}
+
+// =========================================================================
+// INITIALISATION
+// =========================================================================
+
+void setup() {
+    Serial.begin(115200);
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, LOW);
+
+    delay(2000); 
+    Serial.println("Démarrage du système...");
+
+    if (!IMU.begin()) {
+        Serial.println("Erreur IMU!");
+        while(1);
+    }
+    if (!BLE.begin()) {
+        Serial.println("Erreur BLE!");
+        while(1);
+    }
+
+    BLE.setLocalName("Arduiwatch");
+    BLE.setAdvertisedService(fitnessService);
+    fitnessService.addCharacteristic(stepChar);
+    fitnessService.addCharacteristic(etatChar);
+    BLE.addService(fitnessService);
+    
+    etatChar.writeValue((byte)VEILLE);
+    stepChar.writeValue(0);
+    BLE.advertise();
+
+    for(int i = 0; i < WINDOW_SIZE; i++) accHistory[i] = 1.0;
+
+    if (microphone_inference_start(EI_CLASSIFIER_RAW_SAMPLE_COUNT) == false) {
+        Serial.println("Erreur Microphone!");
+        return;
+    }
+    
+    Serial.println("Système prêt et en écoute Bluetooth/Micro ! (Silence en cours...)");
+}
+
+// =========================================================================
+// BOUCLE IA 
+// =========================================================================
+
+
+void loop() {
+    bool m = microphone_inference_record();
+    if (!m) return;
+
+    signal_t signal;
+    signal.total_length = EI_CLASSIFIER_RAW_SAMPLE_COUNT;
+    signal.get_data = &microphone_audio_signal_get_data;
+    ei_impulse_result_t result = { 0 };
+
+    EI_IMPULSE_ERROR r = run_classifier(&signal, &result, debug_nn);
+    if (r != EI_IMPULSE_OK) return;
+
+
+    Serial.println("\n--- Écoute en cours ---");
+    for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+        Serial.print("    ");
+        Serial.print(result.classification[ix].label);
+        Serial.print(": ");
+        Serial.print(result.classification[ix].value * 100);
+        Serial.println("%");
+    }
+    Serial.println("-----------------------");
+
+    // --- VÉRIFICATION DES COMMANDES ---
+    for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+        
+        String label = String(result.classification[ix].label);
+        label.toLowerCase(); 
+        label.trim();        
+        
+        float score = result.classification[ix].value;
+
+        // LA "POUBELLE"
+        if (label == "start") {
+             // L'Arduino ne fait rien
+        }
+        
+        // Commande STOP (On garde un seuil haut pour éviter qu'un bruit sec l'arrête)
+        else if (label == "stop" && score > 0.80) {
+            if (modeActuel != VEILLE) {
+                Serial.print("\n[!] MOT DÉTECTÉ : STOP (Précision: ");
+                Serial.print(score * 100);
+                Serial.println("%)");
+                changerEtat(VEILLE);
+                attenteActiveBLE(1000); 
+            }
+        }
+        
+        // Commande MARCHE : Seuil baissé à 60% (0.60)
+        else if (label == "marche" && score > 0.80) {
+            if (modeActuel != MARCHE) {
+                Serial.print("\n[!] MOT DÉTECTÉ : MARCHE (Précision: ");
+                Serial.print(score * 100);
+                Serial.println("%)");
+                changerEtat(MARCHE);
+                attenteActiveBLE(1000); 
+            }
+        }
+        
+        // Commande COURSE : Seuil baissé à 60% (0.60)
+        else if (label == "course" && score > 0.75) {
+            if (modeActuel != COURSE) {
+                Serial.print("\n[!] MOT DÉTECTÉ : COURSE (Précision: ");
+                Serial.print(score * 100);
+                Serial.println("%)");
+                changerEtat(COURSE);
+                attenteActiveBLE(1000); 
+            }
+        }
+    }
+}
+
+// =========================================================================
+// MOTEUR DU MICROPHONE 
+// =========================================================================
+
+static void pdm_data_ready_inference_callback(void) {
+    int bytesAvailable = PDM.available();
+    int bytesRead = PDM.read((char *)&sampleBuffer[0], bytesAvailable);
+    if (inference.buf_ready == 0) {
+        for(int i = 0; i < bytesRead>>1; i++) {
+            inference.buffer[inference.buf_count++] = sampleBuffer[i];
+            if(inference.buf_count >= inference.n_samples) {
+                inference.buf_count = 0;
+                inference.buf_ready = 1;
+                break;
+            }
+        }
+    }
+}
+
+static bool microphone_inference_start(uint32_t n_samples) {
+    inference.buffer = (int16_t *)malloc(n_samples * sizeof(int16_t));
+    if(inference.buffer == NULL) return false;
+    inference.buf_count  = 0;
+    inference.n_samples  = n_samples;
+    inference.buf_ready  = 0;
+    PDM.onReceive(&pdm_data_ready_inference_callback);
+    PDM.setBufferSize(4096);
+    if (!PDM.begin(1, EI_CLASSIFIER_FREQUENCY)) {
+        microphone_inference_end();
+        return false;
+    }
+    PDM.setGain(127);
+    return true;
+}
+
+static bool microphone_inference_record(void) {
+    inference.buf_ready = 0;
+    inference.buf_count = 0;
+    while(inference.buf_ready == 0) {
+        gererPodometre(); 
+        delay(5);
+    }
+    return true;
+}
+
+static int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr) {
+    numpy::int16_to_float(&inference.buffer[offset], out_ptr, length);
+    return 0;
+}
+
+static void microphone_inference_end(void) {
+    PDM.end();
+    free(inference.buffer);
+}
